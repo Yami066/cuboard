@@ -1,0 +1,191 @@
+"use client";
+
+import { useQuery, type UseQueryOptions } from "@tanstack/react-query";
+import { isApiError } from "@/lib/api/errors";
+import { assistantApi, authApi, explainerApi, githubApi, memoryApi, resourceApi, runApi, sandboxApi, shareApi, teamApi, versionApi, workspaceApi } from "@/lib/api/services";
+import type { SandboxExecution } from "@/lib/api/types";
+
+const isLive = (e?: SandboxExecution | null) => e?.status === "running" || e?.status === "queued";
+
+/** Docker availability and the limits the backend will apply. */
+export const useSandboxHealth = () =>
+  useQuery({ queryKey: qk.sandboxStatus, queryFn: ({ signal }) => sandboxApi.status(signal), refetchInterval: 30_000 });
+
+/** Every sandbox attempt of a run (agent and researcher); polls while one is running. */
+export const useExecutions = (runId: string | null) =>
+  useQuery({
+    queryKey: qk.executions(runId ?? ""),
+    queryFn: ({ signal }) => sandboxApi.list(runId!, signal),
+    enabled: !!runId,
+    refetchInterval: (q) => (q.state.data?.some(isLive) ? 2000 : 15_000),
+  });
+
+/** Self-Healing Debugger sessions with every attempt; polls while one is in progress. */
+export const useHealSessions = (runId: string | null) =>
+  useQuery({
+    queryKey: ["run", runId ?? "", "sandbox", "heal"] as const,
+    queryFn: ({ signal }) => sandboxApi.healSessions(runId!, signal),
+    enabled: !!runId,
+    refetchInterval: (q) => (q.state.data?.some((s) => s.status === "queued" || s.status === "running") ? 1500 : false),
+  });
+
+/** One execution's real status, metrics and artifacts; polls every second while it runs. */
+export const useExecution = (execId: string | null) =>
+  useQuery({
+    queryKey: qk.execution(execId ?? ""),
+    queryFn: ({ signal }) => sandboxApi.get(execId!, signal),
+    enabled: !!execId,
+    refetchInterval: (q) => (isLive(q.state.data) || !q.state.data ? 1000 : false),
+  });
+
+/** Centralised query keys so mutations can invalidate precisely. */
+export const qk = {
+  me: ["me"] as const,
+  myPushes: ["me", "pushes"] as const,
+  repos: ["github", "repos"] as const,
+  workspaces: ["workspaces"] as const,
+  resources: (id: string) => ["run", id, "resources"] as const,
+  versions: (id: string) => ["run", id, "versions"] as const,
+  changeOfRun: (id: string) => ["run", id, "change"] as const,
+  paper: (id: string) => ["run", id, "paper"] as const,
+  workspace: (id: string) => ["workspace", id] as const,
+  notes: (id: string) => ["workspace", id, "notes"] as const,
+  run: (id: string) => ["run", id] as const,
+  checkpoints: (id: string) => ["run", id, "checkpoints"] as const,
+  fileTree: (id: string) => ["run", id, "files"] as const,
+  fileAll: (id: string) => ["run", id, "file"] as const,
+  runEvents: (id: string) => ["run", id, "events"] as const,
+  scorecard: (id: string) => ["run", id, "scorecard"] as const,
+  settings: (id: string) => ["run", id, "settings"] as const,
+  whatifs: (id: string) => ["run", id, "whatifs"] as const,
+  brief: (id: string) => ["run", id, "brief"] as const,
+  files: (id: string) => ["run", id, "files"] as const,
+  file: (id: string, path: string) => ["run", id, "file", path] as const,
+  tests: (id: string) => ["run", id, "tests"] as const,
+  gaps: (id: string) => ["run", id, "gaps"] as const,
+  map: (id: string) => ["run", id, "map"] as const,
+  runMemory: (id: string) => ["run", id, "memory"] as const,
+  briefing: (id: string) => ["run", id, "briefing"] as const,
+  executions: (id: string) => ["run", id, "sandbox", "executions"] as const,
+  execution: (execId: string) => ["sandbox", "execution", execId] as const,
+  sandboxStatus: ["sandbox", "status"] as const,
+  agents: ["agents"] as const,
+  memorySearch: (q: string) => ["memory", "search", q] as const,
+  shared: (t: string) => ["share", t] as const,
+  sharedEvents: (t: string) => ["share", t, "events"] as const,
+  sharedScorecard: (t: string) => ["share", t, "scorecard"] as const,
+  assistantTools: ["assistant", "tools"] as const,
+  assistantTasks: (runId: string) => ["assistant", "tasks", runId] as const,
+  assistantTask: (taskId: string) => ["assistant", "task", taskId] as const,
+};
+
+/** Never retry client errors / missing endpoints; retry transient failures twice. */
+export function shouldRetry(failureCount: number, error: unknown): boolean {
+  if (isApiError(error)) {
+    if (["unauthorized", "forbidden", "not_found", "unavailable", "validation", "conflict", "aborted"].includes(error.kind)) return false;
+  }
+  return failureCount < 2;
+}
+
+type Opts<T> = Omit<UseQueryOptions<T, Error, T, readonly unknown[]>, "queryKey" | "queryFn">;
+
+export const useMe = (o?: Opts<Awaited<ReturnType<typeof authApi.me>>>) =>
+  useQuery({ queryKey: qk.me, queryFn: ({ signal }) => authApi.me(signal), staleTime: 60_000, ...o });
+export const useMyPushes = () => useQuery({ queryKey: qk.myPushes, queryFn: ({ signal }) => authApi.myPushes(signal) });
+export const useRepos = (enabled = true) =>
+  useQuery({ queryKey: qk.repos, queryFn: ({ signal }) => githubApi.listRepos(signal), enabled });
+
+export const useWorkspaces = () => useQuery({ queryKey: qk.workspaces, queryFn: ({ signal }) => workspaceApi.list(signal) });
+export const useWorkspace = (id: string) =>
+  useQuery({ queryKey: qk.workspace(id), queryFn: ({ signal }) => workspaceApi.get(id, signal), enabled: !!id });
+export const useNotes = (id: string) =>
+  useQuery({ queryKey: qk.notes(id), queryFn: ({ signal }) => workspaceApi.notes(id, signal), enabled: !!id });
+
+export const useRun = (id: string | null, refetchInterval?: number | false) =>
+  useQuery({ queryKey: qk.run(id ?? ""), queryFn: ({ signal }) => runApi.get(id!, signal), enabled: !!id, refetchInterval });
+export const useCheckpoints = (id: string | null) =>
+  useQuery({ queryKey: qk.checkpoints(id ?? ""), queryFn: ({ signal }) => runApi.checkpoints(id!, signal), enabled: !!id });
+export const useRunEvents = (id: string | null) =>
+  useQuery({ queryKey: qk.runEvents(id ?? ""), queryFn: ({ signal }) => runApi.events(id!, signal), enabled: !!id });
+export const useScorecard = (id: string | null) =>
+  useQuery({ queryKey: qk.scorecard(id ?? ""), queryFn: ({ signal }) => runApi.scorecard(id!, signal), enabled: !!id });
+export const useSettings = (id: string | null) =>
+  useQuery({ queryKey: qk.settings(id ?? ""), queryFn: ({ signal }) => runApi.settings(id!, signal), enabled: !!id });
+export const useWhatIfs = (id: string | null, refetchInterval?: number | false) =>
+  useQuery({ queryKey: qk.whatifs(id ?? ""), queryFn: ({ signal }) => runApi.whatIfs(id!, signal), enabled: !!id, refetchInterval });
+export const useVersions = (id: string | null) =>
+  useQuery({ queryKey: qk.versions(id ?? ""), queryFn: ({ signal }) => versionApi.versions(id!, signal), enabled: !!id });
+export const useChangeOfRun = (id: string | null) =>
+  useQuery({ queryKey: qk.changeOfRun(id ?? ""), queryFn: ({ signal }) => versionApi.changeOfRun(id!, signal), enabled: !!id });
+const explainerBusy = (s?: string) => !!s && s !== "ready" && s !== "failed";
+/** Paper-to-Video Explainer: the workspace's videos (polls while one is being made) and one video in detail. */
+export const useExplainerVideos = (workspaceId: string) =>
+  useQuery({
+    queryKey: ["workspace", workspaceId, "explainer"] as const,
+    queryFn: ({ signal }) => explainerApi.list(workspaceId, signal),
+    refetchInterval: (q) => (q.state.data?.some((v) => explainerBusy(v.status)) ? 2000 : false),
+  });
+export const useExplainerVideo = (videoId: number | null) =>
+  useQuery({
+    queryKey: ["explainer", videoId ?? 0] as const,
+    queryFn: ({ signal }) => explainerApi.get(videoId!, signal),
+    enabled: !!videoId,
+    refetchInterval: (q) => (!q.state.data || explainerBusy(q.state.data.status) ? 1500 : false),
+  });
+export const useExplainerVoices = () =>
+  useQuery({ queryKey: ["explainer", "voices"] as const, queryFn: ({ signal }) => explainerApi.voices(signal), staleTime: 3_600_000 });
+
+export const usePaper = (id: string | null) =>
+  useQuery({
+    queryKey: qk.paper(id ?? ""), queryFn: ({ signal }) => versionApi.paper(id!, signal), enabled: !!id,
+    refetchInterval: (q) => (q.state.data && ["queued", "generating"].includes(q.state.data.status) ? 2000 : false),
+  });
+export const useResources = (id: string | null) =>
+  useQuery({ queryKey: qk.resources(id ?? ""), queryFn: ({ signal }) => resourceApi.get(id!, signal), enabled: !!id });
+export const useBrief = (id: string | null) =>
+  useQuery({ queryKey: qk.brief(id ?? ""), queryFn: ({ signal }) => runApi.brief(id!, signal), enabled: !!id });
+export const useRunFiles = (id: string | null) =>
+  useQuery({ queryKey: qk.files(id ?? ""), queryFn: ({ signal }) => runApi.files(id!, signal), enabled: !!id });
+export const useFileContent = (id: string | null, path: string | null) =>
+  useQuery({
+    queryKey: qk.file(id ?? "", path ?? ""),
+    queryFn: ({ signal }) => runApi.fileContent(id!, path!, signal),
+    enabled: !!id && !!path,
+  });
+export const useTests = (id: string | null) =>
+  useQuery({ queryKey: qk.tests(id ?? ""), queryFn: ({ signal }) => runApi.tests(id!, signal), enabled: !!id });
+export const useGaps = (id: string | null) =>
+  useQuery({ queryKey: qk.gaps(id ?? ""), queryFn: ({ signal }) => runApi.gaps(id!, signal), enabled: !!id });
+export const useResearchMap = (id: string | null) =>
+  useQuery({ queryKey: qk.map(id ?? ""), queryFn: ({ signal }) => runApi.map(id!, signal), enabled: !!id });
+export const useRunMemory = (id: string | null) =>
+  useQuery({ queryKey: qk.runMemory(id ?? ""), queryFn: ({ signal }) => runApi.memory(id!, signal), enabled: !!id });
+export const useBriefing = (id: string | null) =>
+  useQuery({ queryKey: qk.briefing(id ?? ""), queryFn: ({ signal }) => runApi.briefing(id!, signal), enabled: !!id });
+
+export const useAgents = () => useQuery({ queryKey: qk.agents, queryFn: ({ signal }) => teamApi.agents(signal) });
+export const useMemorySearch = (q: string) =>
+  useQuery({ queryKey: qk.memorySearch(q), queryFn: ({ signal }) => memoryApi.search(q, signal), enabled: q.trim().length > 1 });
+
+export const useSharedView = (t: string) => useQuery({ queryKey: qk.shared(t), queryFn: ({ signal }) => shareApi.view(t, signal) });
+export const useSharedScorecard = (t: string, runId: string | null) =>
+  useQuery({ queryKey: [...qk.sharedScorecard(t), runId], queryFn: ({ signal }) => shareApi.scorecard(t, runId!, signal), enabled: !!runId });
+
+export const useAssistantTools = () =>
+  useQuery({ queryKey: qk.assistantTools, queryFn: ({ signal }) => assistantApi.listTools(signal), staleTime: 60_000 });
+
+export const useAssistantTasks = (runId: string | null) =>
+  useQuery({
+    queryKey: qk.assistantTasks(runId ?? ""),
+    queryFn: ({ signal }) => assistantApi.listTasks(runId!, signal),
+    enabled: !!runId,
+    refetchInterval: (q) => (q.state.data?.some((t) => t.status === "running" || t.status === "pending" || t.status === "waiting_approval") ? 2000 : 10_000),
+  });
+
+export const useAssistantTask = (taskId: string | null) =>
+  useQuery({
+    queryKey: qk.assistantTask(taskId ?? ""),
+    queryFn: ({ signal }) => assistantApi.getTask(taskId!, signal),
+    enabled: !!taskId,
+    refetchInterval: (q) => (q.state.data?.status === "running" || q.state.data?.status === "pending" ? 1500 : false),
+  });
